@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Runner a Dois — Jack & Rai</title>
+<style>
+  :root { --world-w: 360; --world-h: 640; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:#0e0f14; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  #wrap { position: fixed; inset:0; display:grid; place-items:center; }
+  canvas { display:block; width:100vw; height:100vh; touch-action:none; background:#0b1220; }
+  .hud { position: fixed; inset:0; pointer-events:none; }
+  .topbar { position:absolute; top: env(safe-area-inset-top, 12px); left:12px; right:12px; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .btn { pointer-events:auto; background:#1f2b3b; border:1px solid #2f3d54; color:#cfe3ff; padding:10px 14px; border-radius:14px; font-weight:600; }
+  .btn:active { transform:scale(0.98); }
+  .badge { background:#182235; border:1px solid #2a3850; padding:8px 10px; border-radius:12px; font-size:14px; color:#9fb8ff; }
+  .score { position:absolute; top:50%; right:12px; transform:translateY(-50%); writing-mode:vertical-rl; text-orientation:mixed; background:#112; border:1px solid #2a3850; padding:8px 6px; border-radius:12px; color:#9fd4ff; font-weight:700; }
+  .center { position:absolute; inset:0; display:grid; place-items:center; pointer-events:auto; }
+  .panel { background:#0f1726cc; border:1px solid #2a3850; border-radius:18px; padding:16px 16px; width:min(92vw,420px); text-align:center; backdrop-filter: blur(6px); }
+  .title { font-size:20px; margin:4px 0 8px; color:#e7f0ff; }
+  .muted { color:#a8b9d6; font-size:14px; }
+  .row { display:flex; gap:10px; justify-content:center; margin-top:12px; flex-wrap:wrap; }
+  .countdown { font-size:64px; font-weight:800; letter-spacing:2px; color:#aee3ff; text-shadow:0 6px 18px #0ff3; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div class="hud" id="hud">
+    <div class="topbar">
+      <button class="btn" id="btnStart">Iniciar / Parear</button>
+      <div class="row" style="gap:6px">
+        <span class="badge" id="status">offline</span>
+        <button class="btn" id="btnRestart">Restart</button>
+      </div>
+    </div>
+    <div class="score" id="score">0000</div>
+    <div class="center" id="lobby">
+      <div class="panel">
+        <div class="title">Runner a Dois — Jack & Rai</div>
+        <div class="muted">Auto‑pareamento: abra o mesmo link nos dois iPhones.</div>
+        <div class="row">
+          <button class="btn" id="btnCreate">Criar sala</button>
+          <button class="btn" id="btnJoin">Entrar sala</button>
+        </div>
+        <div class="muted" id="lobbyInfo" style="margin-top:10px">Nenhuma sala ainda.</div>
+      </div>
+    </div>
+    <div class="center hidden" id="countdownWrap">
+      <div class="countdown" id="countdown">3</div>
+    </div>
+  </div>
+</div>
+
+<!-- Firebase (CDN) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-database-compat.js"></script>
+
+<script>
+/*** ========== CONFIGURE O FIREBASE AQUI ========== ***/
+const firebaseConfig = {
+  apiKey: "AIzaSyB8Vh5neDd49HNP3xQxZTpwDHxzE952JDY",
+  authDomain: "game-521fd.firebaseapp.com",
+  databaseURL: "https://game-521fd-default-rtdb.firebaseio.com",
+  projectId: "game-521fd",
+  storageBucket: "game-521fd.appspot.com",
+  messagingSenderId: "369687175214",
+  appId: "1:369687175214:web:ce632f6797839caba03fbf",
+  measurementId: "G-BG2W3CT3M4"
+};
+/*** =============================================== ***/
+
+const appFb = firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* ======= Util ======= */
+const rand = (a,b)=>a+Math.random()*(b-a);
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const seededRandom = (seed)=>{ let t = seed>>>0; return ()=>{ t += 0x6D2B79F5; let r = Math.imul(t ^ t>>>15, 1 | t); r ^= r + Math.imul(r ^ r>>>7, 61 | r); return ((r ^ r>>>14)>>>0)/4294967296; }; };
+const uid = ()=>Math.random().toString(36).slice(2,10);
+const fmtScore = n => String(Math.floor(n)).padStart(4,'0');
+const nowMs = ()=>performance.now();
+
+/* ====== Canvas setup ====== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d',{ alpha: false });
+function resize(){
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+  const W = +getComputedStyle(document.documentElement).getPropertyValue('--world-w');
+  const H = +getComputedStyle(document.documentElement).getPropertyValue('--world-h');
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = '100vw'; canvas.style.height = '100vh';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+addEventListener('resize', resize); resize();
+
+/* ====== Imagens (rostos) com fallback ====== */
+const faces = {
+  jack: new Image(),
+  rai: new Image(),
+  ready: { jack:false, rai:false }
+};
+faces.jack.onload = ()=>faces.ready.jack = true;
+faces.rai.onload  = ()=>faces.ready.rai  = true;
+faces.jack.src = 'assets/players/jack.png';
+faces.rai.src  = 'assets/players/rai.png';
+
+/* ====== Estado de jogo ====== */
+const G = {
+  seed: 123456789,
+  rng: seededRandom(123456789),
+  started: false,
+  paused: true,
+  vel: 210, velMax: 360,
+  dist: 0,
+  gravity: 2200,
+  jumpVy: -800,
+  groundY: 540,
+  invulnMs: 1000,
+  nextSpawnAt: 240,
+  spawnGapMin: 160, spawnGapMax: 280,
+  obstacles: [],
+  heart: null,
+  lobbyId: null,
+  me: null, // 'A' ou 'B'
+  colorA: `hsl(${Math.floor(rand(0,360))},85%,65%)`,
+  colorB: `hsl(${Math.floor(rand(0,360))},85%,65%)`,
+  startDelayMs: 2000 // <<< atraso real do B
+};
+
+function makePlayer(role, color){
+  return {
+    role, color,
+    x: 60, y: 0, w: 36, h: 36,
+    vy: 0, onGround:false, alive:true,
+    invulnUntil: 0,
+    startEnableAt: 0, // <<< antes disso o jogador não “vale”
+    img: role==='A'?faces.jack:faces.rai,
+    imgReady: ()=> role==='A'?faces.ready.jack:faces.ready.rai,
+    lastJumpAt: -9999
+  };
+}
+const P = { A: makePlayer('A', G.colorA), B: makePlayer('B', G.colorB) };
+
+/* ====== Obstáculos ====== */
+function spawnObstacle(x){
+  const type = G.rng() < 0.5 ? 'low' : 'high';
+  const w = 28;
+  const h = type==='low' ? 28 : 50;
+  const y = G.groundY - h;
+  G.obstacles.push({ x, y, w, h, type, hit:false });
+}
+function planSpawnsUntil(distTarget){
+  while(G.nextSpawnAt < distTarget + 480){
+    spawnObstacle(G.nextSpawnAt + rand(-10,10));
+    const gap = rand(G.spawnGapMin, G.spawnGapMax);
+    G.nextSpawnAt += gap;
+    G.vel = clamp(G.vel + 0.08, 0, G.velMax);
+    G.spawnGapMin = clamp(G.spawnGapMin - 0.03, 120, 260);
+  }
+}
+
+/* ====== Colisão ====== */
+function rectIntersects(a,b){ return !(a.x+a.w<b.x || a.x>b.x+b.w || a.y+a.h<b.y || a.y>b.y+b.h); }
+
+/* ====== Render ====== */
+function draw(){
+  const W = +getComputedStyle(document.documentElement).getPropertyValue('--world-w');
+  const H = +getComputedStyle(document.documentElement).getPropertyValue('--world-h');
+
+  ctx.fillStyle = '#0b1220'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#0f1a2f'; ctx.fillRect(0, 440, W, 3);
+  ctx.fillStyle = '#12213a'; ctx.fillRect(0, 470, W, 5);
+  ctx.fillStyle = '#1a2840'; ctx.fillRect(0, G.groundY, W, H-G.groundY);
+
+  ctx.fillStyle = '#4f7ccf';
+  for (const o of G.obstacles){
+    const sx = o.x - G.dist;
+    if (sx + o.w < -40 || sx > W+40) continue;
+    ctx.fillRect(sx, o.y, o.w, o.h);
+  }
+
+  if (G.heart && G.heart.active){
+    const hx = G.heart.x - G.dist;
+    if (hx > -40 && hx < W+40){
+      ctx.fillStyle = '#ff6aa0';
+      ctx.beginPath();
+      const {y} = G.heart;
+      ctx.moveTo(hx+10, y+8);
+      ctx.bezierCurveTo(hx, y, hx-8, y+10, hx+10, y+24);
+      ctx.bezierCurveTo(hx+28, y+10, hx+20, y, hx+10, y+8);
+      ctx.fill();
+    }
+  }
+
+  drawPlayer(P.A);
+  drawPlayer(P.B);
+
+  function drawPlayer(p){
+    if (!p.alive) return;
+    const sx = p.x;
+    // sombra
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.ellipse(sx + p.w/2, G.groundY + 6, p.w*0.6, 6, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // se ainda não liberou (B antes de 2s), fica semitransparente
+    const waiting = performance.now() < p.startEnableAt;
+    if (waiting) ctx.globalAlpha = 0.6;
+
+    if (p.imgReady && p.imgReady()){
+      ctx.save();
+      ctx.translate(sx + p.w/2, p.y + p.h/2);
+      const squ = p.onGround ? 1 : 0.94;
+      ctx.scale(1/squ, squ);
+      ctx.drawImage(p.img, -p.w/2, -p.h/2, p.w, p.h);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = p.color;
+      ctx.fillRect(sx, p.y, p.w, p.h);
+    }
+    ctx.globalAlpha = 1;
+
+    if (p.invulnUntil > performance.now()){
+      ctx.strokeStyle = '#fff8';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx-2, p.y-2, p.w+4, p.h+4);
+    }
+  }
+
+  document.getElementById('score').textContent = fmtScore(G.dist/10);
+}
+
+/* ====== Loop ====== */
+let last = 0;
+function step(ts){
+  const t = ts/1000;
+  const dt = Math.min(0.033, last? t - last : 0.016);
+  last = t;
+
+  if (!G.started || G.paused){ draw(); return requestAnimationFrame(step); }
+
+  G.dist += G.vel * dt;
+  planSpawnsUntil(G.dist + 480);
+
+  for (const p of [P.A,P.B]){
+    if (!p.alive) continue;
+    p.vy += G.gravity * dt;
+    p.y  += p.vy * dt;
+    if (p.y + p.h >= G.groundY){ p.y = G.groundY - p.h; p.vy = 0; p.onGround = true; }
+    else p.onGround = false;
+  }
+
+  // colisão: só depois do startEnableAt de cada player
+  for (const p of [P.A,P.B]){
+    if (!p.alive) continue;
+    if (performance.now() < p.startEnableAt) continue; // <<< sem colisão antes de “liberar”
+    if (p.invulnUntil > performance.now()) continue;
+    for (const o of G.obstacles){
+      const sx = o.x - G.dist;
+      const rectP = { x: p.x, y: p.y, w: p.w, h: p.h };
+      const rectO = { x: sx, y: o.y, w: o.w, h: o.h };
+      if (rectIntersects(rectP, rectO)){ die(p.role); break; }
+    }
+  }
+
+  // coração coleta
+  if (G.heart && G.heart.active){
+    for (const p of [P.A,P.B]){
+      const sx = G.heart.x - G.dist;
+      const rectP = { x: p.x, y: p.y, w: p.w, h: p.h };
+      const rectH = { x: sx-8, y: G.heart.y-4, w: 36, h: 28 };
+      if (rectIntersects(rectP, rectH)){ pickHeart(p.role); }
+    }
+  }
+
+  draw();
+  requestAnimationFrame(step);
+}
+requestAnimationFrame(step);
+
+/* ====== Input (tap=jump) ====== */
+function jump(me){
+  const p = me==='A'?P.A:P.B;
+  if (!p.alive) return;
+  if (performance.now() < p.startEnableAt) return; // <<< B ainda não liberado
+  if (p.onGround && performance.now() - p.lastJumpAt > 60){
+    p.vy = G.jumpVy; p.onGround = false; p.lastJumpAt = performance.now();
+    if (navigator.vibrate) navigator.vibrate(25);
+    if (G.lobbyId) db.ref(`lobbies/${G.lobbyId}/events`).push({ t: Date.now(), type:'jump', who: me });
+  }
+}
+canvas.addEventListener('pointerdown', ()=> jump(G.me), {passive:false});
+canvas.addEventListener('touchstart', (e)=> e.preventDefault(), {passive:false});
+
+/* ====== Morte / Revive ====== */
+function die(who){
+  const p = who==='A'?P.A:P.B;
+  if (!p.alive) return;
+  p.alive = false;
+  if (navigator.vibrate) navigator.vibrate([40,40,40]);
+  if (G.lobbyId) db.ref(`lobbies/${G.lobbyId}/events`).push({ t: Date.now(), type:'die', who });
+
+  const otherAlive = (who==='A'?P.B:P.A).alive;
+  if (otherAlive && G.me==='A'){ // host spawna coração à frente
+    const heartX = G.dist + 280 + rand(0,120);
+    G.heart = { x: heartX, y: G.groundY-36, w: 24, h: 24, active:true };
+    db.ref(`lobbies/${G.lobbyId}/heart`).set({ x: heartX, active:true });
+  }
+}
+function pickHeart(who){
+  if (!G.heart || !G.heart.active) return;
+  G.heart.active = false;
+  db.ref(`lobbies/${G.lobbyId}/heart`).set({ x: G.heart.x, active:false });
+  const target = (who==='A'?'B':'A'); // quem pegou revive o outro
+  revive(target);
+  db.ref(`lobbies/${G.lobbyId}/events`).push({ t: Date.now(), type:'revive', who: target });
+}
+function revive(who){
+  const p = who==='A'?P.A:P.B;
+  p.alive = true;
+  p.vy = -250;
+  p.invulnUntil = performance.now() + G.invulnMs;
+  if (navigator.vibrate) navigator.vibrate([20,20,20]);
+}
+
+/* ====== Restart ====== */
+function resetState(keepSeed=false){
+  const seed = keepSeed? G.seed : (Math.random()*1e9)|0;
+  G.seed = seed; G.rng = seededRandom(seed);
+  G.dist = 0; G.vel = 210;
+  G.spawnGapMin = 160; G.spawnGapMax = 280;
+  G.nextSpawnAt = 240;
+  G.obstacles.length = 0;
+  G.heart = null;
+  Object.assign(P.A, makePlayer('A', G.colorA));
+  Object.assign(P.B, makePlayer('B', G.colorB));
+}
+function restartAll(){
+  resetState(false);
+  if (G.lobbyId){
+    db.ref(`lobbies/${G.lobbyId}/state`).update({ seed: G.seed, reqRestart: Date.now() });
+    db.ref(`lobbies/${G.lobbyId}/heart`).set({ x: 0, active:false });
+  }
+  startCountdown(); // nova contagem
+}
+document.getElementById('btnRestart').addEventListener('click', ()=> {
+  if (G.lobbyId) db.ref(`lobbies/${G.lobbyId}/events`).push({ t: Date.now(), type:'restart' });
+  restartAll();
+});
+
+/* ====== Countdown (3-2-1) e início com defasagem ====== */
+const countdownWrap = document.getElementById('countdownWrap');
+const countdownEl = document.getElementById('countdown');
+function startCountdown(){
+  countdownWrap.classList.remove('hidden');
+  let n=3;
+  countdownEl.textContent = n;
+  const iv = setInterval(()=>{
+    n--; countdownEl.textContent = n>0? n : 'GO!';
+    if (n<=0){
+      clearInterval(iv);
+      setTimeout(()=> {
+        countdownWrap.classList.add('hidden');
+        G.started = true; G.paused = false;
+        // libera A imediatamente; B só após 2s
+        const base = performance.now();
+        P.A.startEnableAt = base;
+        P.B.startEnableAt = base + (G.me==='B' ? G.startDelayMs : 0); // <<< cada cliente aplica seu atraso
+      }, 600);
+    }
+  }, 800);
+}
+
+/* ========== LOBBY / AUTO-PAREAR ========== */
+const statusEl = document.getElementById('status');
+const lobbyInfo = document.getElementById('lobbyInfo');
+const lobbyPanel = document.getElementById('lobby');
+const btnStart = document.getElementById('btnStart');
+const btnCreate = document.getElementById('btnCreate');
+const btnJoin = document.getElementById('btnJoin');
+
+let myId = uid();
+let presenceRef = null;
+function setStatus(s){ statusEl.textContent = s; }
+
+function createLobby(){
+  const id = uid();
+  const ref = db.ref(`lobbies/${id}`);
+  const seed = (Math.random()*1e9)|0;
+  ref.set({ createdAt: Date.now(), status: 'waiting', seed, players: { A: null, B: null } });
+  return id;
+}
+async function joinAs(role, id){
+  const ref = db.ref(`lobbies/${id}/players/${role}`);
+  await ref.set({ id: myId, at: Date.now() });
+  await ref.onDisconnect().remove();
+}
+async function tryAutoPairJoin(){
+  setStatus('buscando sala…');
+  const snap = await db.ref('lobbies').orderByChild('status').equalTo('waiting').limitToFirst(1).get();
+  if (!snap.exists()){
+    const id = createLobby();
+    G.lobbyId = id; G.me = 'A';
+    await joinAs('A', id);
+    lobbyInfo.textContent = `Sala criada: ${id}. Aguardando outro jogador…`;
+  } else {
+    const id = Object.keys(snap.val())[0];
+    G.lobbyId = id;
+    const lobby = snap.val()[id] || {};
+    if (!lobby.players || !lobby.players.A){
+      G.me = 'A'; await joinAs('A', id);
+    } else {
+      G.me = 'B'; await joinAs('B', id);
+      await db.ref(`lobbies/${id}`).update({ status:'ready' });
+      lobbyInfo.textContent = `Conectado na sala: ${id}`;
+    }
+  }
+  presenceRef = db.ref(`presence/${myId}`);
+  await presenceRef.set({ at: Date.now(), lobby: G.lobbyId, me: G.me });
+  presenceRef.onDisconnect().remove();
+  wireLobby(G.lobbyId);
+}
+
+function wireLobby(id){
+  setStatus(`sala ${id} (${G.me})`);
+  lobbyPanel.classList.add('hidden');
+
+  db.ref(`lobbies/${id}/state`).on('value', (s)=>{
+    const v = s.val(); if (!v) return;
+    if (typeof v.seed === 'number' && v.seed !== G.seed){
+      G.seed = v.seed; G.rng = seededRandom(G.seed);
+    }
+  });
+  db.ref(`lobbies/${id}/heart`).on('value', (s)=>{
+    const v = s.val(); if (!v) return;
+    G.heart = { x: v.x||0, y: G.groundY-36, w:24, h:24, active: !!v.active };
+  });
+
+  db.ref(`lobbies/${id}/events`).on('child_added', (s)=>{
+    const ev = s.val(); if (!ev) return;
+    if (ev.type === 'jump' && ev.who !== G.me){
+      const p = ev.who==='A'?P.A:P.B;
+      if (performance.now() >= p.startEnableAt && p.alive){ p.vy = G.jumpVy; p.onGround = false; p.lastJumpAt = performance.now(); }
+    }
+    if (ev.type === 'die' && ev.who !== G.me){ (ev.who==='A'?P.A:P.B).alive = false; }
+    if (ev.type === 'revive'){ revive(ev.who); }
+    if (ev.type === 'restart'){ resetState(false); }
+    if (ev.type === 'start'){
+      if (typeof ev.seed === 'number'){ G.seed = ev.seed; G.rng = seededRandom(G.seed); }
+      // cada cliente fará sua própria contagem e liberará A/B conforme regra
+      setTimeout(()=> startCountdown(), 200);
+    }
+  });
+
+  db.ref(`lobbies/${id}/players`).on('value', async (s)=>{
+    const p = s.val()||{};
+    const hasA = !!(p.A && p.A.id);
+    const hasB = !!(p.B && p.B.id);
+    if (G.me==='A' && hasA && hasB && !G.started){
+      resetState(false);
+      await db.ref(`lobbies/${id}/state`).update({ seed: G.seed });
+      db.ref(`lobbies/${id}/events`).push({ t: Date.now(), type:'start', seed: G.seed });
+      lobbyInfo.textContent = 'Ambos conectados! Vai começar…';
+      startCountdown();
+    }
+  });
+}
+
+btnCreate.addEventListener('click', async ()=>{
+  const id = createLobby(); G.lobbyId = id; G.me = 'A';
+  await joinAs('A', id);
+  lobbyInfo.textContent = `Sala criada: ${id}. Aguardando outro jogador…`;
+  wireLobby(id);
+});
+btnJoin.addEventListener('click', tryAutoPairJoin);
+btnStart.addEventListener('click', tryAutoPairJoin);
+</script>
+</body>
+</html>
